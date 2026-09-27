@@ -1,0 +1,6 @@
+{
+  "name": "Jyotir — Vedic Astrology & Digital Astrologer",
+  "description": "Personalized Vedic birth chart interpretations, Kundli analysis, Vimshottari Dashas, and conversational consultations with Acharya Arya.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

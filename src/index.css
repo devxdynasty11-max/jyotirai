@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-cinzel: 'Cinzel', serif;
+    --font-cormorant: 'Cormorant Garamond', Georgia, serif;
+    --font-sans: 'Plus Jakarta Sans', system-ui, sans-serif;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #07090E;
+    color: #E2E6EE;
+  }
+}
+
+.font-cinzel {
+  font-family: var(--font-cinzel);
+}
+
+.font-cormorant {
+  font-family: var(--font-cormorant);
+}
+
+/* Custom delicate scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0B0E17;
+}
+::-webkit-scrollbar-thumb {
+  background: #242938;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3B4259;
+}
+
+/* Celestial glow animations */
+@keyframes celestial-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(1.04); }
+}
+
+.animate-celestial {
+  animation: celestial-pulse 8s ease-in-out infinite;
+}
