@@ -1,6 +1,7 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { calculateVedicChart } from './src/services/astrology/engine.ts';
 import { searchCities } from './src/services/cities/cityDatabase.ts';
@@ -492,18 +493,27 @@ app.get('/api/schema/supabase', async (req, res) => {
 
 // Start Express and Vite
 async function startServer() {
-  if (process.env.NODE_ENV !== 'production') {
+  const isProduction =
+    process.env.NODE_ENV === 'production' ||
+    (process.env.NODE_ENV !== 'development' && fs.existsSync(path.join(__dirname, 'dist', 'index.html')));
+
+  if (isProduction) {
+    console.log('[Jyotir Server] Running in PRODUCTION mode - serving static dist');
+    app.use(express.static(path.join(__dirname, 'dist')));
+    app.get('*', (req, res) => {
+      if (req.path.startsWith('/api')) {
+        return res.status(404).json({ error: 'Endpoint not found' });
+      }
+      res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+    });
+  } else {
+    console.log('[Jyotir Server] Running in DEVELOPMENT mode - mounting Vite middleware');
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
-  } else {
-    app.use(express.static(path.join(__dirname, 'dist')));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(__dirname, 'dist', 'index.html'));
-    });
   }
 
   app.listen(PORT, () => {
