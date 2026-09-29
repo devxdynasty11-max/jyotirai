@@ -225,7 +225,7 @@ Ensure strictly pure valid JSON without markdown fences.
 // API ROUTE 3: AI Dynamic Category Reading (Career, Love, Money, etc.)
 // ====================================================================
 app.post('/api/astrology/category-reading', async (req, res) => {
-  console.log('[Lifecycle] Life Dimensions request started', {
+  console.log('[AI DEBUG] request started', {
     category: req.body?.category,
     timestamp: new Date().toISOString(),
   });
@@ -237,7 +237,7 @@ app.post('/api/astrology/category-reading', async (req, res) => {
     }
 
     const nativeName = chart.birthDetails?.name || 'Querent';
-    console.log('[Lifecycle] Chart data loaded', {
+    console.log('[AI DEBUG] chart data loaded', {
       native: nativeName,
       category,
       ascendant: chart.ascendant?.sign,
@@ -246,7 +246,7 @@ app.post('/api/astrology/category-reading', async (req, res) => {
 
     const cacheKey = `cat_${category}_${nativeName}_${chart.birthDetails?.birthDate || ''}`;
     if (readingCache.has(cacheKey)) {
-      console.log('[Lifecycle] Life Dimensions response returned', { category, fromCache: true });
+      console.log('[AI DEBUG] returning response to frontend (cached)', { category });
       return res.json({ success: true, category, data: readingCache.get(cacheKey) });
     }
 
@@ -299,22 +299,12 @@ Return ONLY a valid JSON object matching this structure:
 Ensure strictly pure valid JSON.
 `;
 
-    console.log('[Lifecycle] AI request started', {
-      category,
-      configuredModel: process.env.AI_MODEL || AI_CONFIG.model,
-    });
-
     const aiResponse = await generateAstrologyCompletion({
       systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
       responseFormat: 'json',
       temperature: 0.7,
       maxTokens: 2000,
-    });
-
-    console.log('[Lifecycle] AI response received', {
-      category,
-      responseLength: aiResponse.length,
     });
 
     const parsedData = safeParseJson<any>(aiResponse, {});
@@ -332,7 +322,7 @@ Ensure strictly pure valid JSON.
       parsedData.suggestedNextQuestions = Array.isArray(parsedData.suggestedNextQuestions) ? parsedData.suggestedNextQuestions : [];
     }
 
-    console.log('[Lifecycle] AI response parsed', {
+    console.log('[AI DEBUG] response parsed', {
       category,
       title: parsedData.title,
       insightsCount: Array.isArray(parsedData.insights) ? parsedData.insights.length : 0,
@@ -341,7 +331,7 @@ Ensure strictly pure valid JSON.
     readingCache.set(cacheKey, parsedData);
     metrics.categoryReadingsGenerated++;
 
-    console.log('[Lifecycle] Life Dimensions response returned', { category });
+    console.log('[AI DEBUG] returning response to frontend', { category });
     return res.json({ success: true, category, data: parsedData });
   } catch (err: any) {
     const isTimeout =
