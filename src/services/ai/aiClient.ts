@@ -8,21 +8,69 @@ dotenv.config();
 export const AI_CONFIG = {
   apiKey: process.env.AI_API_KEY || '',
   baseURL: process.env.AI_BASE_URL || 'https://integrate.api.nvidia.com/v1',
-  model: process.env.AI_MODEL || 'z-ai/glm-5.3-flash',
+  model: process.env.AI_MODEL || 'z-ai/glm-5-3-flash',
   geminiKey: process.env.GEMINI_API_KEY || '',
 };
 
-let openaiClient: OpenAI | null = null;
-if (AI_CONFIG.apiKey) {
-  openaiClient = new OpenAI({
-    apiKey: AI_CONFIG.apiKey,
-    baseURL: AI_CONFIG.baseURL,
-  });
+/**
+ * Sanitizes base URL to prevent /v1/v1, /chat/completions/chat/completions, or missing /v1
+ */
+export function sanitizeBaseUrl(rawUrl?: string): string {
+  let url = (rawUrl || process.env.AI_BASE_URL || AI_CONFIG.baseURL).trim();
+  // Strip trailing slashes
+  url = url.replace(/\/+$/, '');
+  // If user accidentally included /chat/completions in AI_BASE_URL, strip it
+  url = url.replace(/\/chat\/completions$/, '');
+  // If user provided https://integrate.api.nvidia.com without /v1, append /v1
+  if (url === 'https://integrate.api.nvidia.com') {
+    url = 'https://integrate.api.nvidia.com/v1';
+  }
+  return url;
 }
 
-let geminiClient: GoogleGenAI | null = null;
-if (AI_CONFIG.geminiKey) {
-  geminiClient = new GoogleGenAI({ apiKey: AI_CONFIG.geminiKey });
+/**
+ * Resolves model ID for NVIDIA NIM catalog.
+ * In NVIDIA's hosted catalog, the model ID is registered with a dot: "z-ai/glm-5.3-flash".
+ * If the environment specifies "z-ai/glm-5-3-flash" (hyphenated), map it to the registered ID
+ * to prevent 404 route matching errors on NVIDIA's ingress router.
+ */
+export function resolveModelId(rawModel?: string): string {
+  const model = (rawModel || process.env.AI_MODEL || AI_CONFIG.model).trim();
+  if (model === 'z-ai/glm-5-3-flash') {
+    return 'z-ai/glm-5.3-flash';
+  }
+  return model;
+}
+
+/**
+ * Safe JSON parser that removes markdown fences if emitted by the model
+ */
+export function safeParseJson<T = any>(rawText: string, fallback?: T): T {
+  try {
+    let clean = (rawText || '').trim();
+    if (clean.startsWith('```json')) {
+      clean = clean.slice(7);
+    } else if (clean.startsWith('```')) {
+      clean = clean.slice(3);
+    }
+    if (clean.endsWith('```')) {
+      clean = clean.slice(0, -3);
+    }
+    clean = clean.trim();
+    return JSON.parse(clean);
+  } catch (err: any) {
+    console.warn('[AI Engine] Failed to parse JSON cleanly, attempting extraction:', err.message);
+    // Attempt to extract outermost JSON object { ... }
+    const firstBrace = rawText.indexOf('{');
+    const lastBrace = rawText.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      try {
+        return JSON.parse(rawText.substring(firstBrace, lastBrace + 1));
+      } catch (nestedErr) {}
+    }
+    if (fallback !== undefined) return fallback;
+    throw err;
+  }
 }
 
 export interface AiChatMessage {
@@ -41,28 +89,42 @@ export interface AiCompletionOptions {
 /**
  * Universal server-side AI execution engine
  * Dispatches to configured NVIDIA NIM / OpenAI-compatible endpoint,
- * with graceful fallback to Gemini if AI_API_KEY is not yet entered.
+ * with safe error logging, 404 model resolution, and fallback.
  */
 export async function generateAstrologyCompletion(options: AiCompletionOptions): Promise<string> {
   const { systemPrompt, messages, responseFormat = 'text', temperature = 0.7, maxTokens = 2500 } = options;
 
   // Re-read environment dynamically in case credentials were set at runtime
-  const apiKey = process.env.AI_API_KEY || AI_CONFIG.apiKey;
-  const baseURL = process.env.AI_BASE_URL || AI_CONFIG.baseURL;
-  const model = process.env.AI_MODEL || AI_CONFIG.model;
-  const geminiKey = process.env.GEMINI_API_KEY || AI_CONFIG.geminiKey;
+  const apiKey = (process.env.AI_API_KEY || AI_CONFIG.apiKey).trim();
+  const rawBaseURL = process.env.AI_BASE_URL || AI_CONFIG.baseURL;
+  const baseURL = sanitizeBaseUrl(rawBaseURL);
+  const rawModel = process.env.AI_MODEL || AI_CONFIG.model;
+  const targetModel = resolveModelId(rawModel);
+  const geminiKey = (process.env.GEMINI_API_KEY || AI_CONFIG.geminiKey).trim();
 
   // 1. Try NVIDIA NIM / OpenAI-compatible API first
   if (apiKey) {
-    try {
-      const client = new OpenAI({ apiKey, baseURL });
-      const apiMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-        { role: 'system', content: systemPrompt },
-        ...messages.map(m => ({ role: m.role, content: m.content })),
-      ];
+    const client = new OpenAI({
+      apiKey,
+      baseURL,
+    });
 
+    const apiMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
+      { role: 'system', content: systemPrompt },
+      ...messages.map(m => ({ role: m.role, content: m.content })),
+    ];
+
+    // Safe diagnostic log (NO secrets)
+    console.log('[AI Client Request]', {
+      provider: baseURL,
+      endpoint: `${baseURL}/chat/completions`,
+      configuredModel: rawModel,
+      effectiveModel: targetModel,
+    });
+
+    try {
       const completion = await client.chat.completions.create({
-        model,
+        model: targetModel,
         messages: apiMessages,
         temperature,
         max_tokens: maxTokens,
@@ -73,19 +135,65 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
       if (!responseText.trim()) {
         throw new Error('Received empty response from AI provider');
       }
-      return responseText;
-    } catch (err: any) {
-      console.error('[AI Engine Error - OpenAI/NVIDIA NIM]:', {
-        message: err.message,
-        status: err.status,
-        code: err.code,
+
+      console.log('[AI Client Response Success]', {
         provider: baseURL,
-        model,
+        model: targetModel,
+        status: 200,
       });
 
-      // If fallback gemini key exists and primary failed, attempt fallback
+      return responseText;
+    } catch (err: any) {
+      const httpStatus = err.status || err.statusCode || 500;
+      const errorBody = err.error || err.response?.data || err.body || err.message || null;
+
+      // Safe diagnostic error log (NEVER logs apiKey)
+      console.error('[AI Engine Error - OpenAI/NVIDIA NIM]:', {
+        provider: baseURL,
+        model: targetModel,
+        status: httpStatus,
+        message: err.message,
+        errorBody,
+      });
+
+      // If 404 occurred and we used a transformed model, or if the original model differed, retry with the alternate ID
+      if (httpStatus === 404) {
+        const alternateModel = targetModel === rawModel ? resolveModelId(rawModel) : rawModel.trim();
+        if (alternateModel && alternateModel !== targetModel) {
+          console.warn(`[AI Engine] 404 received for model "${targetModel}". Retrying with alternate model ID: "${alternateModel}"...`);
+          try {
+            const retryCompletion = await client.chat.completions.create({
+              model: alternateModel,
+              messages: apiMessages,
+              temperature,
+              max_tokens: maxTokens,
+              ...(responseFormat === 'json' ? { response_format: { type: 'json_object' } } : {}),
+            });
+
+            const retryText = retryCompletion.choices[0]?.message?.content || '';
+            if (retryText.trim()) {
+              console.log('[AI Client Response Success on Alternate Model]', {
+                provider: baseURL,
+                model: alternateModel,
+                status: 200,
+              });
+              return retryText;
+            }
+          } catch (retryErr: any) {
+            console.error('[AI Engine Retry Error - OpenAI/NVIDIA NIM]:', {
+              provider: baseURL,
+              model: alternateModel,
+              status: retryErr.status || retryErr.statusCode || 500,
+              message: retryErr.message,
+              errorBody: retryErr.error || retryErr.response?.data || retryErr.body || null,
+            });
+          }
+        }
+      }
+
+      // If fallback Gemini key exists and primary failed, attempt fallback
       if (geminiKey) {
-        console.warn('[AI Engine] Falling back to secondary provider...');
+        console.warn('[AI Engine] Primary provider failed, attempting Gemini fallback...');
       } else {
         throw new Error('Your astrologer is temporarily unavailable. Please try again in a moment.');
       }

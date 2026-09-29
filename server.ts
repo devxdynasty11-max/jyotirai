@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import { calculateVedicChart } from './src/services/astrology/engine.ts';
 import { searchCities } from './src/services/cities/cityDatabase.ts';
 import { BirthDetails, VedicChartData } from './src/services/astrology/types.ts';
-import { generateAstrologyCompletion, AI_CONFIG } from './src/services/ai/aiClient.ts';
+import { generateAstrologyCompletion, AI_CONFIG, safeParseJson } from './src/services/ai/aiClient.ts';
 import {
   persistChartRecord,
   persistConversationMessage,
@@ -200,7 +200,7 @@ Ensure strictly pure valid JSON without markdown fences.
       temperature: 0.7,
     });
 
-    const parsedReading = JSON.parse(aiResponse);
+    const parsedReading = safeParseJson(aiResponse, {});
     const readingData = {
       ...parsedReading,
       generatedAt: new Date().toISOString(),
@@ -292,7 +292,7 @@ Ensure strictly pure valid JSON.
       temperature: 0.7,
     });
 
-    const parsedData = JSON.parse(aiResponse);
+    const parsedData = safeParseJson(aiResponse, {});
     readingCache.set(cacheKey, parsedData);
     metrics.categoryReadingsGenerated++;
 
@@ -376,7 +376,7 @@ Ensure strictly pure valid JSON.
       temperature: 0.75,
     });
 
-    const parsedAnswer = JSON.parse(aiResponse);
+    const parsedAnswer = safeParseJson<any>(aiResponse, { response: aiResponse });
     metrics.aiQueriesAnswered++;
 
     const astrologerAnswer = {
