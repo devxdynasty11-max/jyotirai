@@ -10,6 +10,7 @@ export const AI_CONFIG = {
   baseURL: process.env.AI_BASE_URL || 'https://integrate.api.nvidia.com/v1',
   model: process.env.AI_MODEL || 'z-ai/glm-5-3-flash',
   geminiKey: process.env.GEMINI_API_KEY || '',
+  timeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '75000', 10), // 75 seconds timeout (around 60–90 seconds)
 };
 
 /**
@@ -84,15 +85,16 @@ export interface AiCompletionOptions {
   responseFormat?: 'json' | 'text';
   temperature?: number;
   maxTokens?: number;
+  timeoutMs?: number;
 }
 
 /**
  * Universal server-side AI execution engine
  * Dispatches to configured NVIDIA NIM / OpenAI-compatible endpoint,
- * with safe error logging, 404 model resolution, and fallback.
+ * with safe error logging, 60-90s server timeout, 404 model resolution, and fallback.
  */
 export async function generateAstrologyCompletion(options: AiCompletionOptions): Promise<string> {
-  const { systemPrompt, messages, responseFormat = 'text', temperature = 0.7, maxTokens = 2500 } = options;
+  const { systemPrompt, messages, responseFormat = 'text', temperature = 0.7, maxTokens = 2000 } = options;
 
   // Re-read environment dynamically in case credentials were set at runtime
   const apiKey = (process.env.AI_API_KEY || AI_CONFIG.apiKey).trim();
@@ -101,12 +103,15 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
   const rawModel = process.env.AI_MODEL || AI_CONFIG.model;
   const targetModel = resolveModelId(rawModel);
   const geminiKey = (process.env.GEMINI_API_KEY || AI_CONFIG.geminiKey).trim();
+  const timeoutMs = options.timeoutMs || AI_CONFIG.timeoutMs;
 
   // 1. Try NVIDIA NIM / OpenAI-compatible API first
   if (apiKey) {
     const client = new OpenAI({
       apiKey,
       baseURL,
+      timeout: timeoutMs,
+      maxRetries: 0, // Disallow lengthy automatic cascading retries that would freeze the client
     });
 
     const apiMessages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
@@ -114,22 +119,34 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
       ...messages.map(m => ({ role: m.role, content: m.content })),
     ];
 
-    // Safe diagnostic log (NO secrets)
+    // Safe diagnostic log (NO secrets, NO API keys)
     console.log('[AI Client Request]', {
       provider: baseURL,
       endpoint: `${baseURL}/chat/completions`,
       configuredModel: rawModel,
       effectiveModel: targetModel,
+      timeoutMs,
     });
 
+    const abortController = new AbortController();
+    const timeoutHandle = setTimeout(() => {
+      abortController.abort(new Error(`NVIDIA NIM request timed out after ${timeoutMs / 1000}s`));
+    }, timeoutMs);
+
     try {
-      const completion = await client.chat.completions.create({
-        model: targetModel,
-        messages: apiMessages,
-        temperature,
-        max_tokens: maxTokens,
-        ...(responseFormat === 'json' ? { response_format: { type: 'json_object' } } : {}),
-      });
+      const completion = await client.chat.completions.create(
+        {
+          model: targetModel,
+          messages: apiMessages,
+          temperature,
+          max_tokens: maxTokens,
+          ...(responseFormat === 'json' ? { response_format: { type: 'json_object' } } : {}),
+        },
+        {
+          timeout: timeoutMs,
+          signal: abortController.signal,
+        }
+      );
 
       const responseText = completion.choices[0]?.message?.content || '';
       if (!responseText.trim()) {
@@ -144,7 +161,15 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
 
       return responseText;
     } catch (err: any) {
-      const httpStatus = err.status || err.statusCode || 500;
+      const isTimeout =
+        err.name === 'AbortError' ||
+        err.name === 'APIConnectionTimeoutError' ||
+        err.message?.toLowerCase().includes('timed out') ||
+        err.message?.toLowerCase().includes('timeout') ||
+        err.status === 408 ||
+        err.status === 504;
+
+      const httpStatus = isTimeout ? 504 : (err.status || err.statusCode || 500);
       const errorBody = err.error || err.response?.data || err.body || err.message || null;
 
       // Safe diagnostic error log (NEVER logs apiKey)
@@ -156,19 +181,33 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
         errorBody,
       });
 
-      // If 404 occurred and we used a transformed model, or if the original model differed, retry with the alternate ID
-      if (httpStatus === 404) {
+      // If it timed out, do not burn more time with alternate model retries
+      if (isTimeout) {
+        if (geminiKey) {
+          console.warn('[AI Engine] Primary provider timed out, attempting Gemini fallback...');
+        } else {
+          const timeoutErr: any = new Error(`Astrological analysis timed out after ${timeoutMs / 1000} seconds.`);
+          timeoutErr.status = 504;
+          throw timeoutErr;
+        }
+      } else if (httpStatus === 404) {
+        // If 404 occurred and we used a transformed model, or if the original model differed, retry with the alternate ID
         const alternateModel = targetModel === rawModel ? resolveModelId(rawModel) : rawModel.trim();
         if (alternateModel && alternateModel !== targetModel) {
           console.warn(`[AI Engine] 404 received for model "${targetModel}". Retrying with alternate model ID: "${alternateModel}"...`);
           try {
-            const retryCompletion = await client.chat.completions.create({
-              model: alternateModel,
-              messages: apiMessages,
-              temperature,
-              max_tokens: maxTokens,
-              ...(responseFormat === 'json' ? { response_format: { type: 'json_object' } } : {}),
-            });
+            const retryCompletion = await client.chat.completions.create(
+              {
+                model: alternateModel,
+                messages: apiMessages,
+                temperature,
+                max_tokens: maxTokens,
+                ...(responseFormat === 'json' ? { response_format: { type: 'json_object' } } : {}),
+              },
+              {
+                timeout: timeoutMs,
+              }
+            );
 
             const retryText = retryCompletion.choices[0]?.message?.content || '';
             if (retryText.trim()) {
@@ -195,8 +234,16 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
       if (geminiKey) {
         console.warn('[AI Engine] Primary provider failed, attempting Gemini fallback...');
       } else {
-        throw new Error('Your astrologer is temporarily unavailable. Please try again in a moment.');
+        const customErr: any = new Error(
+          isTimeout
+            ? 'Astrological analysis took too long. Please try again.'
+            : 'Your astrologer is temporarily unavailable. Please try again in a moment.'
+        );
+        customErr.status = httpStatus;
+        throw customErr;
       }
+    } finally {
+      clearTimeout(timeoutHandle);
     }
   }
 
@@ -206,14 +253,21 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
       const gClient = new GoogleGenAI({ apiKey: geminiKey });
       const fullPrompt = `${systemPrompt}\n\n${messages.map(m => `${m.role === 'user' ? 'Querent' : 'Acharya Arya'}: ${m.content}`).join('\n\n')}`;
 
-      const res = await gClient.models.generateContent({
-        model: 'gemini-3.8-flash',
-        contents: fullPrompt,
-        config: {
-          responseMimeType: responseFormat === 'json' ? 'application/json' : 'text/plain',
-          temperature,
-        },
-      });
+      // Set 30s timeout on Gemini fallback
+      const geminiTimeout = 30000;
+      const res = await Promise.race([
+        gClient.models.generateContent({
+          model: 'gemini-3.8-flash',
+          contents: fullPrompt,
+          config: {
+            responseMimeType: responseFormat === 'json' ? 'application/json' : 'text/plain',
+            temperature,
+          },
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Gemini fallback timed out after 30s')), geminiTimeout)
+        ),
+      ]);
 
       const text = res.text || '';
       if (!text.trim()) {

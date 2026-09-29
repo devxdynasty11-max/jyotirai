@@ -225,14 +225,28 @@ Ensure strictly pure valid JSON without markdown fences.
 // API ROUTE 3: AI Dynamic Category Reading (Career, Love, Money, etc.)
 // ====================================================================
 app.post('/api/astrology/category-reading', async (req, res) => {
+  console.log('[Lifecycle] Life Dimensions request started', {
+    category: req.body?.category,
+    timestamp: new Date().toISOString(),
+  });
+
   try {
     const { chart, category } = req.body as { chart: VedicChartData; category: string };
     if (!chart || !category) {
       return res.status(400).json({ error: 'Chart and category are required' });
     }
 
-    const cacheKey = `cat_${category}_${chart.birthDetails.name}_${chart.birthDetails.birthDate}`;
+    const nativeName = chart.birthDetails?.name || 'Querent';
+    console.log('[Lifecycle] Chart data loaded', {
+      native: nativeName,
+      category,
+      ascendant: chart.ascendant?.sign,
+      moonSign: chart.moonSign?.sign,
+    });
+
+    const cacheKey = `cat_${category}_${nativeName}_${chart.birthDetails?.birthDate || ''}`;
     if (readingCache.has(cacheKey)) {
+      console.log('[Lifecycle] Life Dimensions response returned', { category, fromCache: true });
       return res.json({ success: true, category, data: readingCache.get(cacheKey) });
     }
 
@@ -285,23 +299,70 @@ Return ONLY a valid JSON object matching this structure:
 Ensure strictly pure valid JSON.
 `;
 
+    console.log('[Lifecycle] AI request started', {
+      category,
+      configuredModel: process.env.AI_MODEL || AI_CONFIG.model,
+    });
+
     const aiResponse = await generateAstrologyCompletion({
       systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
       responseFormat: 'json',
       temperature: 0.7,
+      maxTokens: 2000,
     });
 
-    const parsedData = safeParseJson(aiResponse, {});
+    console.log('[Lifecycle] AI response received', {
+      category,
+      responseLength: aiResponse.length,
+    });
+
+    const parsedData = safeParseJson<any>(aiResponse, {});
+
+    // Ensure required fields exist for seamless frontend rendering
+    if (!parsedData.title || !parsedData.overview) {
+      parsedData.title = parsedData.title || `${category.charAt(0).toUpperCase() + category.slice(1)} Astrological Synthesis`;
+      parsedData.overview =
+        parsedData.overview ||
+        (typeof aiResponse === 'string'
+          ? aiResponse.replace(/[{}\[\]"]/g, '').trim()
+          : 'Astrological synthesis complete.');
+      parsedData.insights = Array.isArray(parsedData.insights) ? parsedData.insights : [];
+      parsedData.astrologicalFactors = Array.isArray(parsedData.astrologicalFactors) ? parsedData.astrologicalFactors : [];
+      parsedData.suggestedNextQuestions = Array.isArray(parsedData.suggestedNextQuestions) ? parsedData.suggestedNextQuestions : [];
+    }
+
+    console.log('[Lifecycle] AI response parsed', {
+      category,
+      title: parsedData.title,
+      insightsCount: Array.isArray(parsedData.insights) ? parsedData.insights.length : 0,
+    });
+
     readingCache.set(cacheKey, parsedData);
     metrics.categoryReadingsGenerated++;
 
-    res.json({ success: true, category, data: parsedData });
+    console.log('[Lifecycle] Life Dimensions response returned', { category });
+    return res.json({ success: true, category, data: parsedData });
   } catch (err: any) {
-    console.error('[Category Reading Error]:', err);
+    const isTimeout =
+      err.name === 'AbortError' ||
+      err.name === 'APIConnectionTimeoutError' ||
+      err.message?.toLowerCase().includes('timed out') ||
+      err.message?.toLowerCase().includes('timeout') ||
+      err.status === 504;
+    const statusCode = isTimeout ? 504 : (err.status || 500);
+
+    console.error('[Category Reading Error]:', {
+      message: err.message,
+      status: statusCode,
+      isTimeout,
+    });
     metrics.errorsLogged++;
-    res.status(500).json({
-      error: 'Your astrologer is temporarily unavailable. Please try again in a moment.',
+
+    return res.status(statusCode).json({
+      error: isTimeout
+        ? 'Astrological analysis took too long. Please try again.'
+        : 'Your astrologer is temporarily unavailable. Please try again in a moment.',
       details: err.message,
     });
   }

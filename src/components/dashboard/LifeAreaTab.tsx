@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { VedicChartData } from '../../services/astrology/types.ts';
 import { BRAND_CONFIG } from '../../config/brand.ts';
 import { Sparkles, Bookmark, ArrowRight, Compass, Shield, Clock, Heart, Briefcase, DollarSign, Users, User, Flame } from 'lucide-react';
@@ -28,34 +28,71 @@ export const LifeAreaTab: React.FC<LifeAreaTabProps> = ({
   const [readingsCache, setReadingsCache] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
+  const currentAbortRef = useRef<AbortController | null>(null);
 
   const fetchCategoryReading = async (catId: string) => {
-    if (readingsCache[catId]) return;
+    if (readingsCache[catId]) {
+      setLoading(false);
+      setError('');
+      return;
+    }
+
+    // Abort previous in-flight request to prevent race conditions or hanging requests
+    if (currentAbortRef.current) {
+      currentAbortRef.current.abort();
+    }
+
+    const abortController = new AbortController();
+    currentAbortRef.current = abortController;
+
+    // Safety client-side timeout (80s) to guarantee UI never gets stuck
+    const clientTimeout = setTimeout(() => {
+      abortController.abort(new Error('Request timed out.'));
+    }, 80000);
 
     setLoading(true);
     setError('');
+
     try {
       const res = await fetch('/api/astrology/category-reading', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chart, category: catId }),
+        signal: abortController.signal,
       });
-      const data = await res.json();
-      if (data.success && data.data) {
+
+      const data = await res.json().catch(() => ({}));
+
+      if (res.ok && data.success && data.data) {
         setReadingsCache((prev) => ({ ...prev, [catId]: data.data }));
       } else {
-        setError(data.error || 'Failed to load reading');
+        setError(data.error || data.details || 'Acharya Arya could not complete this synthesis. Please tap Retry.');
       }
     } catch (err: any) {
-      setError('Unable to consult chart at this moment. Please try again.');
+      if (err.name === 'AbortError' || err.message?.includes('timed out')) {
+        setError('Astrological synthesis took too long. Please tap Retry to try again.');
+      } else {
+        setError(err.message || 'Unable to consult chart at this moment. Please try again.');
+      }
     } finally {
-      setLoading(false);
+      clearTimeout(clientTimeout);
+      if (currentAbortRef.current === abortController) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
     fetchCategoryReading(activeCategory);
   }, [activeCategory]);
+
+  useEffect(() => {
+    return () => {
+      if (currentAbortRef.current) {
+        currentAbortRef.current.abort();
+      }
+    };
+  }, []);
 
   const currentReading = readingsCache[activeCategory];
 
