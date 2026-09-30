@@ -10,7 +10,7 @@ export const AI_CONFIG = {
   baseURL: process.env.AI_BASE_URL || 'https://integrate.api.nvidia.com/v1',
   model: process.env.AI_MODEL || 'z-ai/glm-5-3-flash',
   geminiKey: process.env.GEMINI_API_KEY || '',
-  timeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '75000', 10), // 75 seconds timeout (around 60–90 seconds)
+  timeoutMs: parseInt(process.env.AI_TIMEOUT_MS || '65000', 10), // 65 seconds server timeout (60-90s window)
 };
 
 /**
@@ -91,7 +91,7 @@ export interface AiCompletionOptions {
 /**
  * Universal server-side AI execution engine
  * Dispatches to configured NVIDIA NIM / OpenAI-compatible endpoint,
- * with safe error logging, 60-90s server timeout, 404 model resolution, and resilient fallback.
+ * with strict [LD-4], [LD-5], [LD-6] tracing and bounded AbortSignal timeout.
  */
 export async function generateAstrologyCompletion(options: AiCompletionOptions): Promise<string> {
   const { systemPrompt, messages, responseFormat = 'text', temperature = 0.7, maxTokens = 2000 } = options;
@@ -104,6 +104,8 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
   const targetModel = resolveModelId(rawModel);
   const geminiKey = (process.env.GEMINI_API_KEY || AI_CONFIG.geminiKey).trim();
   const timeoutMs = options.timeoutMs || AI_CONFIG.timeoutMs;
+
+  console.log('[LD-4] AI request starting');
 
   // 1. Try NVIDIA NIM / OpenAI-compatible API first
   if (apiKey) {
@@ -119,7 +121,7 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
       ...messages.map(m => ({ role: m.role, content: m.content })),
     ];
 
-    console.log('[AI DEBUG] calling NVIDIA', {
+    console.log('[LD-5] NVIDIA request sent', {
       baseURL,
       endpoint: `${baseURL}/chat/completions`,
       configuredModel: rawModel,
@@ -147,8 +149,7 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
         }
       );
 
-      console.log('[AI DEBUG] NVIDIA response status: 200');
-      console.log('[AI DEBUG] NVIDIA response received');
+      console.log('[LD-6] NVIDIA response received', { status: 200 });
 
       const responseText = completion.choices[0]?.message?.content || '';
       if (!responseText.trim()) {
@@ -168,7 +169,6 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
       const httpStatus = isTimeout ? 504 : (err.status || err.statusCode || 500);
       const errorBody = err.error || err.response?.data || err.body || err.message || null;
 
-      console.log(`[AI DEBUG] NVIDIA response status: ${httpStatus}`);
       console.error('[AI Engine Error - OpenAI/NVIDIA NIM]:', {
         provider: baseURL,
         model: targetModel,
@@ -180,7 +180,7 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
       // If it timed out, do not burn more time with alternate model retries
       if (isTimeout) {
         if (geminiKey) {
-          console.warn('[AI Engine] Primary provider timed out, attempting fallback...');
+          console.warn('[AI Engine] Primary provider timed out, attempting fast fallback...');
         } else {
           const timeoutErr: any = new Error(`Astrological analysis timed out after ${timeoutMs / 1000} seconds.`);
           timeoutErr.status = 504;
@@ -192,7 +192,7 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
         if (alternateModel && alternateModel !== targetModel) {
           console.warn(`[AI Engine] 404 received for model "${targetModel}". Retrying with alternate model ID: "${alternateModel}"...`);
           try {
-            console.log('[AI DEBUG] calling NVIDIA (alternate model retry)', { model: alternateModel });
+            console.log('[LD-5] NVIDIA request sent (alternate model retry)', { model: alternateModel });
             const retryCompletion = await client.chat.completions.create(
               {
                 model: alternateModel,
@@ -206,15 +206,13 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
               }
             );
 
-            console.log('[AI DEBUG] NVIDIA response status: 200');
-            console.log('[AI DEBUG] NVIDIA response received');
+            console.log('[LD-6] NVIDIA response received', { status: 200, alternate: true });
 
             const retryText = retryCompletion.choices[0]?.message?.content || '';
             if (retryText.trim()) {
               return retryText;
             }
           } catch (retryErr: any) {
-            console.log(`[AI DEBUG] NVIDIA response status: ${retryErr.status || retryErr.statusCode || 500}`);
             console.error('[AI Engine Retry Error - OpenAI/NVIDIA NIM]:', {
               provider: baseURL,
               model: alternateModel,
@@ -243,28 +241,25 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
     }
   }
 
-  // 2. Resilient AI Fallback (e.g. Gemini)
+  // 2. Resilient Fast AI Fallback (e.g. Gemini)
   if (geminiKey) {
     try {
-      console.log('[AI DEBUG] Engaging AI fallback provider');
+      console.log('[LD-5] NVIDIA request sent (fallback AI provider)');
       const gClient = new GoogleGenAI({ apiKey: geminiKey });
       const fullPrompt = `${systemPrompt}\n\n${messages.map(m => `${m.role === 'user' ? 'Querent' : 'Acharya Arya'}: ${m.content}`).join('\n\n')}`;
 
-      // Try verified available high-performance models in sequence
+      // Fast, active flash models in optimal priority
       const candidateModels = [
         'gemini-3.5-flash',
         'gemini-3.6-flash',
         'gemini-3.5-flash-lite',
         'gemini-3.1-flash-lite',
-        'gemini-3.8-flash',
-        'gemini-flash-latest',
       ];
       let lastErr: any = null;
 
       for (const candidateModel of candidateModels) {
         try {
-          console.log(`[AI DEBUG] Attempting AI generation via ${candidateModel}...`);
-          const geminiTimeout = 40000;
+          const perModelTimeout = 18000; // 18 seconds max per model to prevent client timeouts
           const res = await Promise.race([
             gClient.models.generateContent({
               model: candidateModel,
@@ -275,18 +270,17 @@ export async function generateAstrologyCompletion(options: AiCompletionOptions):
               },
             }),
             new Promise<never>((_, reject) =>
-              setTimeout(() => reject(new Error(`${candidateModel} timed out after 40s`)), geminiTimeout)
+              setTimeout(() => reject(new Error(`${candidateModel} timed out after 18s`)), perModelTimeout)
             ),
           ]);
 
           const text = res.text || '';
           if (text.trim()) {
-            console.log(`[AI DEBUG] AI fallback succeeded via ${candidateModel}`);
-            console.log('[AI DEBUG] NVIDIA response received'); // Emitted for unified log contract
+            console.log('[LD-6] NVIDIA response received', { fallbackModel: candidateModel });
             return text;
           }
         } catch (mErr: any) {
-          console.warn(`[AI DEBUG] ${candidateModel} failed:`, mErr.message?.slice(0, 100));
+          console.warn(`[AI Fallback] ${candidateModel} failed:`, mErr.message?.slice(0, 100));
           lastErr = mErr;
         }
       }

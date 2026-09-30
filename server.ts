@@ -225,7 +225,7 @@ Ensure strictly pure valid JSON without markdown fences.
 // API ROUTE 3: AI Dynamic Category Reading (Career, Love, Money, etc.)
 // ====================================================================
 app.post('/api/astrology/category-reading', async (req, res) => {
-  console.log('[AI DEBUG] request started', {
+  console.log('[LD-1] Life Dimensions request received', {
     category: req.body?.category,
     timestamp: new Date().toISOString(),
   });
@@ -237,7 +237,7 @@ app.post('/api/astrology/category-reading', async (req, res) => {
     }
 
     const nativeName = chart.birthDetails?.name || 'Querent';
-    console.log('[AI DEBUG] chart data loaded', {
+    console.log('[LD-2] Chart loaded', {
       native: nativeName,
       category,
       ascendant: chart.ascendant?.sign,
@@ -246,7 +246,8 @@ app.post('/api/astrology/category-reading', async (req, res) => {
 
     const cacheKey = `cat_${category}_${nativeName}_${chart.birthDetails?.birthDate || ''}`;
     if (readingCache.has(cacheKey)) {
-      console.log('[AI DEBUG] returning response to frontend (cached)', { category });
+      console.log('[LD-8] Life Dimensions synthesis completed (from cache)', { category });
+      console.log('[LD-9] Response sent to frontend (cached)', { category });
       return res.json({ success: true, category, data: readingCache.get(cacheKey) });
     }
 
@@ -299,6 +300,13 @@ Return ONLY a valid JSON object matching this structure:
 Ensure strictly pure valid JSON.
 `;
 
+    console.log('[LD-3] Astrology data prepared', {
+      category,
+      hasChartData: !!chart.ascendant,
+      hasYogas: chart.yogas?.length || 0,
+      dasha: chart.dashas?.currentMahadasha?.planet,
+    });
+
     const aiResponse = await generateAstrologyCompletion({
       systemPrompt,
       messages: [{ role: 'user', content: userPrompt }],
@@ -322,7 +330,7 @@ Ensure strictly pure valid JSON.
       parsedData.suggestedNextQuestions = Array.isArray(parsedData.suggestedNextQuestions) ? parsedData.suggestedNextQuestions : [];
     }
 
-    console.log('[AI DEBUG] response parsed', {
+    console.log('[LD-7] AI response parsed', {
       category,
       title: parsedData.title,
       insightsCount: Array.isArray(parsedData.insights) ? parsedData.insights.length : 0,
@@ -331,7 +339,9 @@ Ensure strictly pure valid JSON.
     readingCache.set(cacheKey, parsedData);
     metrics.categoryReadingsGenerated++;
 
-    console.log('[AI DEBUG] returning response to frontend', { category });
+    console.log('[LD-8] Life Dimensions synthesis completed', { category });
+
+    console.log('[LD-9] Response sent to frontend', { category });
     return res.json({ success: true, category, data: parsedData });
   } catch (err: any) {
     const isTimeout =
