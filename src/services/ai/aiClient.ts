@@ -271,11 +271,8 @@ export async function generateAstrologyCompletion(
              * This prevents reasoning content from being treated
              * as the final user-facing astrology answer.
              */
-            extra_body: {
-              chat_template_kwargs: {
-                clear_thinking: true,
-              },
-            },
+            reasoning_effort: 'low',
+stream: false,
           } as any,
           {
             timeout: timeoutMs,
